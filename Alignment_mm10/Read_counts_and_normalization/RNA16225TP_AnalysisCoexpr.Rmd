@@ -1,0 +1,300 @@
+Title
+========================================================
+
+##Load Required Libraries
+```{r, eval=FALSE}
+library(foreach)
+library(doMC)
+registerDoMC()
+library(multtest)
+library(WGCNA)
+library("org.Mm.eg.db")
+library(biomaRt)
+library(GOstats)
+library("org.Mm.eg.db")
+library("edgeR")
+library(vegan)
+library(ncf)
+library(lawstat)
+```
+
+## This will be needed for the annotation
+```{r, eval=FALSE}
+source("http://bioconductor.org/biocLite.R")
+biocLite("org.Mm.eg.db")
+biocLite("GOstats")
+```
+## Setup the environment
+```{r, eval=FALSE}
+getDoParWorkers()
+options(cores=4)
+getDoParWorkers()
+
+setwd("/lawrencedata/ongoing_analyses/RNA160225TP/all_fastq/Alignment_mm10/Read_counts_and_normalization")
+source("./functionDefinitions.R")
+
+try(dir.create("resultsCoexpr"), silent = T)
+try( dir.create("figuresCoexpr"), silent = F)
+
+load("selectedCountData.RData")
+load("groups_info_and_diffexpr_objects.RData")
+```
+
+## Generate the Consensus Network
+### Calculate the adjacency consensus
+```{r, eval=FALSE}
+adjConsensus=adjacency(t(normalizedGeneCountsUQ_genes_extra_selected), power=1)
+```
+
+### Generate the coexpression network construction plot
+```{r, eval=FALSE}
+powers = c(c(1:10), seq(from = 12, to=20, by=2))
+sft = pickSoftThreshold.fromSimilarity(adjConsensus, powerVector = powers, verbose = 5, moreNetworkConcepts=T)
+plotNetConstruction(sft)
+```
+
+### Select a soft threshold to calculate the adjacency coexpression matrix based on what is seen in the plot above
+```{r, eval=FALSE}
+softPowerCoexpr=8
+adjCoexpr=adjConsensus^softPowerCoexpr
+adjCoexpr[is.na(adjCoexpr)]=0
+
+connCoexpr=rowSums(adjCoexpr)
+hist(connCoexpr, 100)
+
+hierADJCoexpr = hclust(as.dist(1-adjCoexpr),method="average");
+
+# code below might need modifications to make the number of modules between ~ 15 and 50, and to make number of grey genes less than ~ 2-3000
+hybridCoexpr=cutreeHybrid(dendro = hierADJCoexpr, distM=1-adjCoexpr, cutHeight = 0.9995, minClusterSize = 100, deepSplit = 4, maxCoreScatter = NULL, minGap = NULL, maxAbsCoreScatter = NULL, minAbsGap = NULL, pamStage = TRUE, pamRespectsDendro = F, useMedoids = FALSE,  respectSmallClusters = TRUE, verbose = 2, indent = 0)
+
+colorsCoexpr = labels2colors(hybridCoexpr$labels)
+geneNames = rownames(normalizedGeneCountsUQ_genes_extra_selected)
+names(colorsCoexpr)=geneNames
+table(colorsCoexpr)
+length(table(colorsCoexpr))
+modulesCoexpr=names(table(colorsCoexpr))
+sum(colorsCoexpr=="grey")
+
+
+fileConnSummary<-file("GeneNetworkAnalysis/resultsCoexpr/SummaryResultsCoexpr.txt",  open="at")
+
+writeLines(paste("Number modules ", length(table(colorsCoexpr)), sep=','), fileConnSummary)
+writeLines(paste("Number grey genes  ",  sum(colorsCoexpr=="grey"), sep=','), fileConnSummary)
+
+close(fileConnSummary)
+
+adj_H=adjacency(t(H_genes_counts), power=softPowerCoexpr)
+adj_L=adjacency(t(L_genes_counts), power=softPowerCoexpr)
+save(softPowerCoexpr,adjCoexpr, connCoexpr,hierADJCoexpr,hybridCoexpr,colorsCoexpr,modulesCoexpr, adj_H,adj_L, file="data/adjCoexpr.RData")
+
+```
+
+## Neuronal Enrichment Modules
+```{r, eval=FALSE}
+load("data/adjCoexpr.RData")
+neuronsList=read.csv("data/CahoyNeurons.csv", header=TRUE)
+neuronsSymbols= neuronsList[,"Gene.Name"]
+
+astrosList=read.csv("data/CahoyAstros.csv", header=TRUE)
+astrosSymbols= astrosList[,"Gene.Name"]
+
+oligosList=read.csv("data/CahoyOligos.csv", header=TRUE)
+oligosSymbols= oligosList[,"Gene.Name"]
+
+moduleEnrichmentNeurons = moduleEnrichment (colorsCoexpr, neuronsSymbols)
+moduleEnrichmentAstros = moduleEnrichment (colorsCoexpr, astrosSymbols)
+moduleEnrichmentOligos = moduleEnrichment (colorsCoexpr, oligosSymbols)
+
+cellTypeEnrichment=round(cbind(moduleEnrichmentNeurons,moduleEnrichmentAstros, moduleEnrichmentOligos),4)
+colnames(cellTypeEnrichment)=c("Neurons", "Astros", "Oligos")
+rownames(cellTypeEnrichment)=modulesCoexpr
+
+
+fileConnSummary<-file("GeneNetworkAnalysis/resultsCoexpr/SummaryResultsCoexpr.txt",  open="at")
+writeLines(paste("Modules enriched in neuronal cell types\n "), fileConnSummary)
+close(fileConnSummary)
+
+write.csv(cellTypeEnrichment, file="GeneNetworkAnalysis/resultsCoexpr/cellTypeEnrich.csv", append=T)
+```
+
+## save the results below for use with enrinchR
+```{r, eval=FALSE}
+try(dir.create("GeneNetworkAnalysis/resultsCoexpr/moduleGeneList"), silent = T)
+
+coexprConnConsensus=intramodularConnectivity(adjCoexpr,  colorsCoexpr, scaleByMax=T)
+totalScaledConnectivity=coexprConnConsensus[,"kTotal"]/max(coexprConnConsensus[,"kTotal"])
+
+coexprConnHigh=intramodularConnectivity(adj_H,  colorsCoexpr, scaleByMax=T)
+coexprConnLow=intramodularConnectivity(adj_L,  colorsCoexpr, scaleByMax=T)
+
+coexprResultsTable=cbind(colorsCoexpr, totalScaledConnectivity,round(coexprConnConsensus[,"kWithin"],3), round(coexprConnHigh[,"kWithin"],3), round(coexprConnLow[,"kWithin"],3))
+colnames(coexprResultsTable)=c("module", "total Scale Conn", "Consensus Conn (kWithin)", "High Conn (kWithin)", "Low Conn (kWithin)")
+rownames(coexprResultsTable)=geneNames
+
+for (module in modulesCoexpr){
+  print(module)
+  currModuleInfo=cbind(rownames(coexprResultsTable)[colorsCoexpr==module],as.data.frame(coexprResultsTable[colorsCoexpr==module,"Consensus Conn (kWithin)"]))
+  write.csv(currModuleInfo, file=paste("GeneNetworkAnalysis/resultsCoexpr/moduleGeneList/module_", module, ".csv", sep=""), row.names=F, col.names=F)  
+}
+```
+
+## GO annotations
+```{r, eval=FALSE}
+load("data/transcriptInfoMouse.RData")
+setwd("/lawrencedata/ongoing_analyses/RNA160225TP/all_fastq/Alignment_mm10/Read_counts_and_normalization/GeneNetworkAnalysis")
+annotateMouseModulesGO(colorsCoexpr, transcriptInfoMouse, "RNA15225TP", type="Coexpr")
+```
+## record differential expression
+```{r, eval=FALSE}
+resultsDEtotal=read.csv("resultsCoexpr/resultsDEtotal.csv", row.names=1)
+summaryResultsDE=cbind(coexprResultsTable, resultsDEtotal[rownames(coexprResultsTable),1:3])
+
+meanHSCC_H=rowMeans(H_genes_counts)
+meanHSCC_L=rowMeans(L_genes_counts)
+
+summaryResultsDE=cbind(summaryResults_DE, meanHSCC_H, meanHSCC_L)
+write.csv(summaryResultsDE, file="resultsCoexpr/summaryResultsShell.csv")
+```
+
+## find differentially variable genes
+```{r, eval=FALSE}
+pvalVar=rep(1, length(geneNames))
+names(pvalVar)=geneNames
+pvalVar=pvalVar
+
+for (gene in geneNames){
+  pvalVar[gene]=var.test(x=H_genes_counts[gene,], y=L_genes_counts[gene,])$p.value
+}
+
+adjpOut=mt.rawp2adjp(pvalVar, proc=c( "BH"))
+fdrVar=adjpOut$adjp[order(adjpOut$index),2]
+
+sd_H=apply(H_genes_counts, 1, sd)
+sd_L=apply(L_genes_counts, 1, sd)
+
+summaryResultsDV=cbind(summaryResultsDV, pvalVar, fdrVar, sd_H, sd_L)
+
+write.csv(summaryResultsShell, file="resultsCoexpr/summaryResultsDV.csv")
+```
+## Filter DE and DV genes
+```{r, eval=FALSE}
+deGenes=geneNames[summaryResultsDE[,"PValue"] < 0.01]
+dvGenes=geneNames[summaryResultsDV[,"pvalVar"] < 0.01]
+
+modulesEnrichDEDV=moduleEnrichment(colorsCoexpr, union(deGenes, dvGenes))
+affectedModulesDEDV=names(modulesEnrichDEDV)[modulesEnrichDEDV<(0.05/length(modulesCoexpr))]
+
+fileConnSummary<-file("resultsCoexpr/SummaryResultsCoexpr.txt",  open="at")
+writeLines(paste("\n "), fileConnSummary)
+
+writeLines(paste("Modules affected by DE and/or DV expression changes ", affectedModulesDEDV, sep=','), fileConnSummary)
+close(fileConnSummary)
+```
+############################################################################
+# evaluate changes in edge strength
+```{r, eval=FALSE}
+rawAdj1=adjacency(t(HSCC_H), power=1)
+rawAdj2=adjacency(t(HSCC_L), power=1)
+
+diffEdgesShell = diffEdges(rawAdj1, rawAdj2, n1=dim(HSCC_H)[2], n2=dim(HSCC_L)[2], pThreshold=0.01, adjThreshold=0.5, nCores=7)
+  
+save(diffEdgesShell, file="resultsCoexpr/diffEdgesShell.RData")
+load("resultsCoexpr/diffEdgesShell.RData")
+
+totalEdges=(length(geneNames))^2
+affectedEdges=sum(diffEdgesShell)
+edgeChangeRate=affectedEdges/totalEdges
+
+geneChangeEdgeCount=rowSums(diffEdgesShell)
+names(geneChangeEdgeCount)=geneNames
+
+pValuesEdgeChange=rep(1,length(geneNames))
+names(pValuesEdgeChange)=geneNames
+
+for (gene in geneNames){
+  pValuesEdgeChange[gene]=binom.test(x=geneChangeEdgeCount[gene], n=length(geneNames), p=edgeChangeRate, alternative  ="g")$p.value
+}
+
+adjpOut=mt.rawp2adjp(pValuesEdgeChange, proc=c( "BH"))
+fdrEdgesChange=adjpOut$adjp[order(adjpOut$index),2]
+
+summaryResultsShell=cbind(summaryResultsShell, pValuesEdgeChange, fdrEdgesChange,geneChangeEdgeCount )
+write.csv(summaryResultsShell, file="resultsCoexpr/summaryResultsShell.csv")
+
+
+genesChangedEdges=geneNames[pValuesEdgeChange < 0.01]
+geneChangeEdgeCount[genesChangedEdges]
+mean(geneChangeEdgeCount)
+mean(geneChangeEdgeCount[genesChangedEdges])
+
+median(geneChangeEdgeCount)
+median(geneChangeEdgeCount[genesChangedEdges])
+
+
+hist(geneChangeEdgeCount)
+
+names(colorsCoexpr)=geneNames
+edgesModuleEnrich=moduleEnrichment(colorsCoexpr, genesChangedEdges)
+affectedModules=names(edgesModuleEnrich[edgesModuleEnrich<(0.05/length(modulesCoexpr))])
+
+fileConnSummary<-file("resultsCoexpr/SummaryResultsCoexpr.txt",  open="at")
+writeLines(paste("Modules affected by edge changes  ", affectedModules, sep=','), fileConnSummary)
+close(fileConnSummary)
+
+
+##############################################################################
+summaryResultsShell=read.csv("resultsCoexpr/summaryResultsShell.csv")
+# summaryResultsShell[,3:18]=round(summaryResultsShell[,3:18], 3)
+# write.csv(summaryResultsShell, file="resultsCoexpr/summaryResultsShell.csv")
+
+
+hubsResultsShell=summaryResultsShell[(summaryResultsShell[,"de.calls"] ==1 | summaryResultsShell[,"fdrVar"]<0.1 | summaryResultsShell[,"fdrEdgesChange"]<0.1) & summaryResultsShell[,"moduleScaledConn"] > 0.8, ]
+write.csv(hubsResultsShell, file="resultsCoexpr/hubsResultsShell.csv")
+##############################################################################
+#calculate overlap with Mulligan 2006
+
+MulliganTable=read.csv("data/SITable2_MulliganPonamarev_2006.csv", skip=1, header=T)
+MulliganGenes=as.character(MulliganTable[,1])
+
+genesShellPval=summaryResultsShell[(summaryResultsShell[,"PValue"] <0.01 | summaryResultsShell[,"pvalVar"]<0.01 | summaryResultsShell[,"pValuesEdgeChange"]<0.01),"Gene.Names"]
+genesShellFdr=summaryResultsShell[(summaryResultsShell[,"fdrDE"] <0.01 | summaryResultsShell[,"fdrVar"]<0.01 | summaryResultsShell[,"fdrEdgesChange"]<0.01),"Gene.Names"]
+
+intersect(MulliganGenes,genesShellPval)
+length(intersect(MulliganGenes,genesShellFdr))
+# length(intersect(MulliganGenes,genesShellFdr))
+# [1] 252
+fisher.test(summaryResultsShell[,"Gene.Names"] %in% genesShellPval, summaryResultsShell[,"Gene.Names"]  %in% MulliganGenes, alternative = "g")
+fisher.test(summaryResultsShell[,"Gene.Names"] %in% genesShellFdr, summaryResultsShell[,"Gene.Names"]  %in% MulliganGenes, alternative = "g")
+
+MulliganDE=summaryResultsShell[,"Gene.Names"]  %in% MulliganGenes
+
+summaryResultsShell=cbind(summaryResultsShell, MulliganDE)
+write.csv(summaryResultsShell, file="resultsCoexpr/summaryResultsShell.csv")
+
+##############################################################################
+hubsResultsShellCoexpr=read.csv("resultsCoexpr/hubsResultsShell.csv")[,"Gene.Names"]
+hubsResultsShellCoSplicEx=read.csv("resultsCoSplicEx/hubsResultsShell.csv")[,"Gene.Names"]
+
+intersect(hubsResultsShellCoexpr, hubsResultsShellCoSplicEx)
+
+##############################################################################
+# summaryResultsShell=read.csv("resultsCoexpr/summaryResultsCoexprShell.csv")
+# 
+# summaryResultsShell=cbind(summaryResultsShell[,2:4], coexprConnHigh[,"kWithin"], coexprConnLow[,"kWithin"], summaryResultsShell[,6:18])
+# summaryResultsShell[,3:18]=round(summaryResultsShell[,3:18], 3)
+# colnames(summaryResultsShell)[1]="Gene Names"
+# colnames(summaryResultsShell)[4:5]=c("High Conn", "Low Conn")
+# write.csv(summaryResultsShell, file="resultsCoexpr/summaryResultsShell.csv")
+
+##########################################################################################################
+hubsResultsShell=read.csv("resultsCoexpr/hubsResultsShell.csv")
+
+colorsHubsAffected=rep("white", length(geneNames))
+names(colorsHubsAffected)=geneNames
+colorsHubsAffected[hubsResultsShell[,"Gene.Names"]]="black"
+
+# GO annotations
+
+load("/home/dan/workDir/HDID2/data/transcriptInfoMouse.RData")
+annotateMouseModulesGO(colorsHubsAffected, transcriptInfoMouse, type="CoexprHubsAffected")
+

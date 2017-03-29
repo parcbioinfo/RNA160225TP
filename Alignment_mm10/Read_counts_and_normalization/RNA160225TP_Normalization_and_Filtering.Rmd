@@ -1,0 +1,160 @@
+---
+title: "RNA160225TP Coexpression Analysis - Expression analysis of genetic risk for MA consumption (RI504)"
+author: "Ovidiu Dan Iancu & Priscila Darakjian"
+date: "August 23, 2016"
+output: 
+  rmdformats::material:
+    self_contained: false
+    thumbnails: true
+    lightbox: true
+    gallery: true
+    highlight: tango
+---
+# RNA160225TP - RNASeq Reads Normalization and Filtering 
+#### *Ovidiu Dan Iancu & Priscila Darakjian*
+#### *August 23, 2016*
+========================================================
+
+## 1. Prepare Data for analysis
+
+### &nbsp;&nbsp;&nbsp;&nbsp;a) Preparing the environment:
+
+### &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Load necessary libraries and functions
+```{r}
+library(edgeR)
+library(foreach)
+library(doMC)
+registerDoMC()
+library(plyr)
+
+setwd("/lawrencedata/ongoing_analyses/RNA160225TP/all_fastq/Alignment_mm10/Read_counts_and_normalization")
+source("./functionDefinitions.R")
+
+```
+### &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Setup number of cores to be used and set the working directory
+```{r}
+getDoParWorkers()
+options(cores=4)
+getDoParWorkers()
+
+
+```
+### &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;If directory structure is non-existing create the directories that will house the result files</li>
+```{r}
+try(dir.create("resultsCoexpr"), silent = T)
+try( dir.create("figuresCoexpr"), silent = F)
+try(dir.create("resultsCoSplicEx"), silent = T)
+try( dir.create("figuresCoSplicEx"), silent = F)
+```
+
+### &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Now we need to upload the file containing the raw reads count
+```{r, eval=FALSE}
+geneReadsRaw=read.table("data/RNA160225TP_mm10_coverage_splitoption.txt", header=F)
+```
+</br>
+
+### &nbsp;&nbsp;&nbsp;&nbsp;b) Preparing the raw counts data for processing:
+
+* Change column 4 name to "gene_sym"
+* Combine the chromosome number, start location, and gene symbol to create a unique id column for each exon
+* Create a data frame with gene symbol and exon read counts
+
+```{r, eval=FALSE}
+names(geneReadsRaw)[4]<-"gene_sym"
+geneReadsRaw$exon<-paste(geneReadsRaw$V1,geneReadsRaw$V2,geneReadsRaw$V3,geneReadsRaw$gene_sym,sep="_")
+exon_counts<-geneReadsRaw[,7:54]
+exon_counts<-cbind(geneReadsRaw$gene_sym,exon_counts)
+```
+</br>
+### &nbsp;&nbsp;&nbsp;&nbsp;c)Prepare a "gene counts" data frame for further analysis (use ddply (plyr package) to calculate the total counts for each gene for each sample): 
+
+```{r, eval=FALSE}
+gene_counts<-ddply(exon_counts, 1, numcolwise(sum))
+names(gene_counts)[1]<-"gene_sym"
+rownames(gene_counts)<-gene_counts$gene_sym
+gene_counts<-gene_counts[,2:48]
+```
+
+## Finish formating the exon counts data frame for exon analysis:
+* Change the row names of the exon data frame to the exon unique ids (created above)
+* Remove the gene symbol column from the exon data frame
+
+```{r, eval=FALSE}
+rownames(exon_counts)<-exon_counts$exon
+exon_counts<-exon_counts[,2:48]
+```
+
+## Add the sample names to the column headers in both gene and exon counts data frames:
+```{r, eval=FALSE}
+sample_names<-read.table("data/samples.txt", sep=",")
+colnames(gene_counts)<-t(sample_names)
+colnames(exon_counts)<-t(sample_names)
+
+write.table(gene_counts,"RNA160225TP_gene_reads_not_normalized.txt", sep="\t",quote=F,col.names=T,row.names=T)
+write.table(exon_counts,"RNA160225TP_exon_reads_not_normalized.txt", sep="\t",quote=F,col.names=T,row.names=T)
+save.image("ReadCountsNormalization.RData")
+```
+# Normalize gene and exon counts
+
+```{r, eval=FALSE}
+load("ReadCountsNormalization.RData")
+
+UQnormFactors_exons=calcNormFactors(exon_counts, method=c("upperquartile"))
+UQnormFactors_genes=calcNormFactors(gene_counts, method=c("upperquartile"))
+
+effectiveLibrarySizes_exons= UQnormFactors_exons*colSums(exon_counts)
+effectiveLibrarySizes_genes= UQnormFactors_genes*colSums(gene_counts)
+
+meanEffLibSize_exons=mean(effectiveLibrarySizes_exons)
+meanEffLibSize_genes=mean(effectiveLibrarySizes_genes)
+
+countNormFactor_exons= meanEffLibSize_exons/effectiveLibrarySizes_exons
+countNormFactor_genes= meanEffLibSize_genes/effectiveLibrarySizes_genes
+
+normalizedGeneCountsUQ_exons=0* exon_counts
+normalizedGeneCountsUQ_genes=0* gene_counts
+
+for (sample in 1:dim(normalizedGeneCountsUQ_exons)[2]){  
+  normalizedGeneCountsUQ_exons[,sample]= exon_counts[, sample]* countNormFactor_exons[sample]  
+}
+
+for (sample in 1:dim(normalizedGeneCountsUQ_genes)[2]){  
+  normalizedGeneCountsUQ_genes[,sample]= gene_counts[, sample]* countNormFactor_genes[sample]  
+}
+
+normalizedGeneCountsUQ_exons =round(normalizedGeneCountsUQ_exons)
+normalizedGeneCountsUQ_genes =round(normalizedGeneCountsUQ_genes)
+
+write.table(normalizedGeneCountsUQ_exons,"RNA160225TP_exon_reads_UQNormalized.txt", sep="\t",quote=F,col.names=T,row.names=T)
+write.table(normalizedGeneCountsUQ_genes,"RNA160226TP_gene_reads_UQNormalized.txt", sep="\t",quote=F,col.names=T,row.names=T)
+
+save.image("ReadCountsNormalization.RData")
+```
+## Select from the normalized gene counts only those genes with CPM > 1 in at least half the samples
+```{r, eval=FALSE}
+keep_genes <- rowSums(cpm(normalizedGeneCountsUQ_genes) > 1) >= ncol(sample_names)/2
+sum(keep_genes=="TRUE")
+normalizedGeneCountsUQ_genes_selected <- normalizedGeneCountsUQ_genes[keep_genes,]
+colnames(normalizedGeneCountsUQ_genes_selected)=colnames(normalizedGeneCountsUQ_genes)
+write.table(normalizedGeneCountsUQ_genes_selected,"RNA160226TP_selected_gene_reads_UQNormalized.txt",sep="\t",quote=F,col.names=T,row.names=T)
+```
+
+## Select from the normalized exon counts only those genes with CPM > 1 in at least half the samples
+```{r, eval=FALSE}
+keep_exons <- rowSums(cpm(normalizedGeneCountsUQ_exons) > 1) >= ncol(sample_names)/2
+sum(keep_exons=="TRUE")
+normalizedGeneCountsUQ_exons_selected <- normalizedGeneCountsUQ_exons[keep_exons,]
+colnames(normalizedGeneCountsUQ_exons_selected)=colnames(normalizedGeneCountsUQ_exons)
+write.table(normalizedGeneCountsUQ_exons_selected,"RNA160226TP_selected_exons_reads_UQNormalized.txt",sep="\t",quote=F,col.names=T,row.names=T)
+```
+
+## Further filter the selected gene counts by removing those genes that were not selected in the selected exons data frame (i.e. normalizedExonCountsSelected)
+```{r, eval=FALSE}
+x<-rownames(exon_counts) %in% rownames(normalizedGeneCountsUQ_exons_selected)
+extra_selected_genes<-unique(geneReadsRaw$gene_sym[x])
+rows.to.keep<-which(rownames(normalizedGeneCountsUQ_genes_selected) %in% extra_selected_genes)
+normalizedGeneCountsUQ_genes_extra_selected<-normalizedGeneCountsUQ_genes_selected[rows.to.keep,]
+write.table(normalizedGeneCountsUQ_genes_extra_selected,"RNA160226TP_extra_selected_gene_reads_UQNormalized.txt", sep="\t",quote=F,col.names=T,row.names=T)
+save(normalizedGeneCountsUQ_exons,normalizedGeneCountsUQ_exons_selected,normalizedGeneCountsUQ_genes,normalizedGeneCountsUQ_genes_extra_selected,normalizedGeneCountsUQ_genes_selected, file="selectedCountData.RData")
+```
+

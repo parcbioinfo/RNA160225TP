@@ -1,0 +1,156 @@
+Title
+========================================================
+```{r, eval=FALSE}
+library(edgeR)
+library(foreach)
+library(doMC)
+registerDoMC()
+library(plyr)
+
+setwd("/lawrencedata/ongoing_analyses/RNA160225TP/all_fastq/Alignment_mm10/Read_counts_and_normalization")
+source("./functionDefinitions.R")
+
+```
+### Setup number of cores to be used and set the working directory
+```{r, eval=FALSE}
+getDoParWorkers()
+options(cores=4)
+getDoParWorkers()
+
+```
+
+## Load gene count data and separate samples into phenotype groups (High --> L and Low --> L)
+```{r, eval=FALSE}
+load("ReadCountsNormalization.RData")
+load("selectedCountData.RData")
+H_group<-sample_names[,grepl("H",t(sample_names))]
+L_group<-sample_names[,!grepl("H",t(sample_names))]
+
+H_genes_counts<-normalizedGeneCountsUQ_genes_extra_selected[,colnames(normalizedGeneCountsUQ_genes_extra_selected) %in% t(H_group)]
+L_genes_counts<-normalizedGeneCountsUQ_genes_extra_selected[,colnames(normalizedGeneCountsUQ_genes_extra_selected) %in% t(L_group)]
+```
+
+## Compare expression between H and L
+```{r, eval=FALSE}
+groupSelection=c(rep("H_group",dim(H_genes_counts)[2]),rep("L_group",dim(L_genes_counts)[2]))
+groupSelection =factor(groupSelection)
+
+d=DGEList(counts= cbind(H_genes_counts, L_genes_counts), group= groupSelection)
+d <- estimateTagwiseDisp(d)
+de.tgw <- exactTest(d, dispersion="tagwise") 
+de.calls <- decideTestsDGE(de.tgw, p=0.05, adjust.method="fdr")
+resultsDEtotal=cbind(de.tgw$table, de.calls)
+```
+## select genes with logCPM > 0  and high number of reads for further inclusion in network construction
+```{r, eval=FALSE}
+resultsDEtotal=resultsDEtotal[resultsDEtotal[,"logCPM"]>0,]
+write.csv(resultsDEtotal, file="data/RNA160225TP_H_vs_L_coexpression.csv", quote=F)
+save(L_genes_counts,H_genes_counts,L_group,H_group,groupSelection,d,resultsDEtotal, file="groups_info_and_diffexpr_objects.RData")
+```
+
+
+
+
+
+
+
+
+## find genes with high number of reads
+
+#connCounts=softConnectivity(t(gene_counts), power=6)
+
+#quantileConn=quantile(connCounts, seq(0, 1, 0.1))  
+#geneReadsHighConn=gene_counts[connCounts>quantileConn[6],]
+#geneNamesHighConn=rownames(geneReadsHighConn)
+###################################################################################
+
+splitIDs=mapply(strsplit, rownames(exonCounts), MoreArgs=list(split="_", fixed = FALSE, perl = FALSE, useBytes = FALSE))
+exonGeneName=unlist(lapply(splitIDs, "[[", 4))
+exon_start=unlist(lapply(splitIDs, "[[", 2))
+
+#sum(exonCounts[exonGeneName=="Drd2",])
+#sum(geneReadsHighConn[geneNamesHighConn=="Drd2",])
+
+exon_unique_id=mapply(paste, exonGeneName, exon_start, MoreArgs=list(sep="_"))
+names(exonGeneName)=exon_unique_id
+
+rownames(exonCounts)= exon_unique_id
+sampleNames=as.vector(colnames(exonCounts))
+
+normExonCounts=0* exonCounts
+for (sample in 1:dim(exonCounts)[2]){
+  normExonCounts[,sample]= exonCounts[, sample]* countNormFactor_exons[sample]  
+}
+normExonCounts =round(normExonCounts)
+rownames(normExonCounts)=rownames(exonCounts)
+
+
+# select exons from genes with at least 1 CPM
+exonCountsHighCounts=normExonCounts[which(exonGeneName %in% rownames(resultsDEtotal)),]
+exonGeneNamesHighCounts=exonGeneName[exonGeneName %in% rownames(resultsDEtotal)]
+
+canberraListExons=foreach (geneName = rownames(resultsDEtotal), .inorder=T, .verbose = T) %dopar% {
+  #geneName=geneNames[i]
+  currExonCounts= exonCountsHighCounts[which(exonGeneNamesHighCounts==geneName),]	
+  if (is.null(dim(currExonCounts))){
+    exonDistMatrix=as.matrix(dist(as.matrix(currExonCounts), method="canberra"))
+  } else {
+    exonDistMatrix=as.matrix(dist(t(as.matrix(currExonCounts)), method="canberra"))
+  }
+  colnames(exonDistMatrix)=exonColnames
+  rownames(exonDistMatrix)=exonColnames
+  exonDistMatrix
+  
+}
+names(canberraListExons)=rownames(resultsDEtotal)
+
+save(canberraListExons, file="data/canberraListExons.RData")
+load("data/canberraListExons.RData")
+
+nGenes=length(canberraListExons)
+gene_indexes=1:nGenes
+
+# reformat the data so one can use WGCNA adjacency function to construct CoSplicEx adjacency matrix
+lengthVector=length(as.vector(as.dist(canberraListExons[[1]])))
+distData=matrix(data=0, nrow=lengthVector, ncol=length(canberraListExons))
+colnames(distData)=names(canberraListExons)
+
+for(gene in names(canberraListExons)) {
+  distData[,gene]=as.vector(as.dist(canberraListExons[[gene]]))
+} 
+
+adjCoSplicEx_large=adjacency(distData,power=6)
+
+
+save(adjCoSplicEx_large, file="adjCoSplicEx_large.RData")
+
+load("adjCoSplicEx_large.RData")
+#just in case ...
+adjCoSplicEx_large[is.na(adjCoSplicEx_large)]=0
+diag(adjCoSplicEx_large)=1
+colnames(adjCoSplicEx_large)=rownames(adjCoSplicEx_large)
+
+
+connCoSplicEx=rowSums(adjCoSplicEx_large)
+quantileConnExons=quantile(connCoSplicEx, probs = seq(0, 1, 0.1))  
+
+geneNamesHighCoSplicExConn=names(canberraListExons)[connCoSplicEx>quantileConnExons[6]]
+################################################################################################3
+selectedGeneCounts=geneReadsHighConn
+
+canberraListSelected=canberraListExons[geneNamesHighCoSplicExConn]
+#write.table(as.data.frame(canberraListSelected),"RNA160225TP_CanberraList_Selected.txt")
+adjCoSplicEx=adjCoSplicEx_large[geneNamesHighCoSplicExConn,geneNamesHighCoSplicExConn]
+
+exonGeneNameSelected=geneNamesHighCoSplicExConn
+selectedExonCounts=normExonCounts[which(exonGeneName %in% geneNamesHighCoSplicExConn),]
+
+
+
+save(selectedGeneCounts, canberraListSelected,adjCoSplicEx,selectedExonCounts, exonGeneNameSelected,file="selectedData.RData")
+
+
+
+############################################################################################
+```
+
